@@ -43,6 +43,15 @@
 #include "bumper.h"
 #include "mqtt.h"
 #include "events.h"
+#include "coverage_planner.h"
+#include "schedule_manager.h"
+
+static CoveragePlanner coveragePlanner;
+static ScheduleManager scheduleManager;
+
+// simulated clock for scheduling
+static int simMinutes = 0;
+static int loopCount  = 0;
 
 // #define I2C_SPEED  10000
 #define _BV(x) (1 << (x))
@@ -145,6 +154,11 @@ bool stateChargerConnected = false;
 float lastGPSMotionX = 0;
 float lastGPSMotionY = 0;
 unsigned long nextGPSMotionCheckTime = 0;
+// --- ENH2: battery drain by distance ---
+static bool enh2_posInit = false;
+static float enh2_lastX = 0.0f;
+static float enh2_lastY = 0.0f;
+static float enh2_totalDistanceM = 0.0f;
 
 bool testRelais = false;
 
@@ -924,6 +938,32 @@ bool detectObstacleRotation(){
 
 // robot main loop
 void run(){  
+
+  static bool phase3InitDone = false;
+    if (!phase3InitDone) {
+        // TEMP: hard-coded bounds until we hook real map values
+        // adjust these numbers if your lawn is bigger/smaller
+        float minX = -3.0f;
+        float maxX =  3.0f;
+        float minY = -3.0f;
+        float maxY =  3.0f;
+        float rowSpacing = 0.5f;    // 0.5 m between passes
+
+        coveragePlanner.initFromBounds(minX, maxX, minY, maxY, rowSpacing);
+
+        // allow mowing from 08:00–10:00
+        scheduleManager.setWindow(8, 0, 10, 0);
+
+        phase3InitDone = true;
+    }
+
+    // --- simulated time for ScheduleManager ---
+    loopCount++;
+    if (loopCount >= 100) {        // every 100 iterations => +1 minute
+        loopCount = 0;
+        simMinutes = (simMinutes + 1) % 1440;
+    }
+
   
   #ifdef ENABLE_NTRIP
     if (millis() > nextGenerateGGATime){
@@ -1038,6 +1078,25 @@ void run(){
     stateEstimator.controlLoops++;    
     
     stateEstimator.computeRobotState();
+    // --- ENH2: distance-based battery drain ---
+if (!enh2_posInit) {
+  enh2_lastX = stateEstimator.stateX;
+  enh2_lastY = stateEstimator.stateY;
+  enh2_posInit = true;
+} else {
+  float dx = stateEstimator.stateX - enh2_lastX;
+  float dy = stateEstimator.stateY - enh2_lastY;
+  float d  = sqrt(dx*dx + dy*dy);  // meters
+
+  if (d > 0.001f) { // ignore noise
+    enh2_totalDistanceM += d;
+    enh2_lastX = stateEstimator.stateX;
+    enh2_lastY = stateEstimator.stateY;
+
+    battery.updateByDistance(d);   // ENH2 method
+  }
+}
+
     if (!robotShouldMove()){
       resetLinearMotionMeasurement();
       updateGPSMotionCheckTime();  
@@ -1062,11 +1121,13 @@ void run(){
     if (battery.chargerConnected() != stateChargerConnected) {    
       stateChargerConnected = battery.chargerConnected(); 
       if (stateChargerConnected){      
-        // charger connected event        
-        activeOp->onChargerConnected();                
-      } else {
-        activeOp->onChargerDisconnected();
-      }            
+  enh2_totalDistanceM = 0;
+  battery.resetDistanceDrain();   // ENH2 method
+  activeOp->onChargerConnected();                
+} else {
+  activeOp->onChargerDisconnected();
+}
+          
     }
     if (millis() > nextBadChargingContactCheck) {
       if (battery.badChargerContact()){
@@ -1095,15 +1156,19 @@ void run(){
           activeOp->onRainTriggered();                                                                              
         }                           
       }    
-      if (battery.shouldGoHome()){
-        activeOp->onBatteryLowShouldDock();        
-      }   
-       
-      if (battery.chargerConnected()){
-        if (battery.chargingHasCompleted()){
-          activeOp->onChargingCompleted();
-        }
-      }        
+      if (battery.shouldGoHome()) {
+  // tell current operation first (it may do cleanup)
+  activeOp->onBatteryLowShouldDock();
+
+  // HARD OVERRIDE: if not already docking/charging/idle, switch to dock now
+  if (stateEstimator.stateOp != OP_DOCK &&
+      stateEstimator.stateOp != OP_CHARGE &&
+      stateEstimator.stateOp != OP_IDLE) {
+    CONSOLE.println("LOW BATTERY: forcing OP_DOCK");
+    setOperation(OP_DOCK, false);
+  }
+
+}
     } 
 
     //CONSOLE.print("active:");

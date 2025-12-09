@@ -43,11 +43,18 @@
 #include "bumper.h"
 #include "mqtt.h"
 #include "events.h"
-#include "coverage_planner.h"
-#include "schedule_manager.h"
 
-static CoveragePlanner coveragePlanner;
-static ScheduleManager scheduleManager;
+// --- ADDED FOR SIMULATION HACK ---
+#include <fstream>
+#include <string>
+#include <iostream>
+// ---------------------------------
+
+// #include "coverage_planner.h"
+// #include "schedule_manager.h"
+
+// static CoveragePlanner coveragePlanner;
+// static ScheduleManager scheduleManager;
 
 // simulated clock for scheduling
 static int simMinutes = 0;
@@ -796,6 +803,36 @@ bool detectLift(){
 // detect obstacle (bumper, sonar, ToF)
 // returns true, if obstacle detected, otherwise false
 bool detectObstacle(){   
+
+  static unsigned long simTimer = 0;
+  // Check every 200ms to avoid slowing down the robot
+  if (millis() > simTimer + 200) { 
+      simTimer = millis();
+      
+      // THIS IS YOUR CONFIRMED LINUX PATH
+      std::ifstream infile("/home/fayaaz/MowerShared/sensor.txt"); 
+      
+      if (infile.good()) {
+        std::string val;
+        std::getline(infile, val);
+        infile.close(); // Close file immediately
+
+        // If Unity wrote "1", it means we hit a tree
+        if (val == "1") {
+            CONSOLE.println("SIMULATION: Obstacle Hit! Triggering Avoidance."); 
+            
+            // Register the hit in stats
+            stats.statMowBumperCounter++;
+            
+            // This function handles the STOP, REVERSE, and TURN automatically
+            triggerObstacle(); 
+            
+            return true; // Stop processing and react immediately
+        }
+      }
+  }
+  // ---------------------------------------------------------
+
   if (! ((robotShouldMoveForward()) || (robotShouldRotate())) ) return false;      
   if (TOF_ENABLE){
     if (millis() >= nextToFTime){
@@ -949,10 +986,10 @@ void run(){
         float maxY =  3.0f;
         float rowSpacing = 0.5f;    // 0.5 m between passes
 
-        coveragePlanner.initFromBounds(minX, maxX, minY, maxY, rowSpacing);
+        //coveragePlanner.initFromBounds(minX, maxX, minY, maxY, rowSpacing);
 
         // allow mowing from 08:00–10:00
-        scheduleManager.setWindow(8, 0, 10, 0);
+        //scheduleManager.setWindow(8, 0, 10, 0);
 
         phase3InitDone = true;
     }
@@ -1335,4 +1372,4 @@ void setOperation(OperationType op, bool allowRepeat){
   //   startMow();
   // #endif
     //Logger.event(EVT_SYSTEM_STARTED);
-
+//}
